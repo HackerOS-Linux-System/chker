@@ -1,4 +1,5 @@
-// odin
+// bytes
+// hhc
 
 > cd source-code
-> odin build .
+> bytes build --release
