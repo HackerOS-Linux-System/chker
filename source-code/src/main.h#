@@ -1,1 +1,223 @@
+using "2026"
+;; chker.h# — H# rewrite of the Odin kernel installer
+;; Commands: liquorix, xanmod, deb-kernel
 
+fn print_help() is
+    write("Usage: chker <command>")
+    write("Commands:")
+    write("  liquorix    - Install Liquorix kernel, remove Debian kernel")
+    write("  xanmod      - Install XanMod kernel, remove Debian kernel")
+    write("  deb-kernel  - Install Debian kernel, remove current custom kernel")
+end
+
+fn run_cmd(cmd: string) -> string is
+    return trim(shell(cmd))
+end
+
+fn sudo_run(cmd: string) is
+    shell("sudo " + cmd)
+end
+
+fn command_exists(cmd: string) -> bool is
+    let r: string = trim(shell("command -v " + cmd + " 2>/dev/null"))
+    return r != ""
+end
+
+fn get_cpu_model() -> string is
+    return trim(shell("grep 'Model name' /proc/cpuinfo | head -1 | cut -d: -f2 | xargs"))
+end
+
+fn get_cpu_vendor() -> string is
+    return trim(shell("grep 'vendor_id' /proc/cpuinfo | head -1 | cut -d: -f2 | xargs"))
+end
+
+fn get_cpu_text() -> string is
+    let model: string  = to_lower(get_cpu_model())
+    let vendor: string = to_lower(get_cpu_vendor())
+    let lscpu: string  = to_lower(trim(shell("lscpu 2>/dev/null")))
+    return model + " " + vendor + " " + lscpu
+end
+
+fn get_current_kernel() -> string is
+    return trim(shell("uname -r"))
+end
+
+fn parse_mappings(file: string) -> string is
+    ;; Returns newline-separated "pattern>target" lines
+    return trim(shell("grep -oP '(?<=\[)[^\]]+>[^\]]+(?=\])' " + file + " 2>/dev/null"))
+end
+
+fn match_cpu_variant(cpu_text: string, mappings: string) -> string is
+    ;; Sort by pattern length descending, match against cpu_text
+    let matched: string = trim(shell(
+        "echo '" + mappings + "' | awk -F'>' '{print length($1),"|",$0}' | sort -rn | cut -d' ' -f2- | while IFS='|' read _ line; do pat=$(echo $line | cut -d'>' -f1 | xargs | tr '[:upper:]' '[:lower:]'); tgt=$(echo $line | cut -d'>' -f2 | xargs); if echo '" + cpu_text + "' | grep -qi "$pat"; then echo $tgt; break; fi; done | head -1"
+    ))
+    if matched == "" is
+        matched = "x86-64"
+    end
+    return matched
+end
+
+fn get_xanmod_variant(target: string) -> string is
+    let v: string = "x64v1"
+    if contains(target, "v3") is
+        v = "x64v3"
+    else if contains(target, "v2") is
+        v = "x64v2"
+    end
+    return v
+end
+
+fn check_and_install_nvidia(prefix: string) is
+    write(prefix + " Sprawdzam NVIDIA...")
+    if command_exists("lspci") == false is
+        sudo_run("apt install -y pciutils")
+    end
+    let lspci: string = to_lower(trim(shell("lspci -nnk 2>/dev/null")))
+    if contains(lspci, "nvidia") is
+        write(prefix + " Wykryto NVIDIA — instaluje sterowniki.")
+        sudo_run("apt update")
+        sudo_run("apt install -y nvidia-driver nvidia-kernel-dkms nvidia-smi libnvidia-ml1 nvidia-settings")
+    else is
+        write(prefix + " Nie wykryto NVIDIA.")
+    end
+end
+
+fn remove_debian_kernel(prefix: string) is
+    let script: string = "/usr/share/HackerOS/Scripts/Bin/remove-debian-kernel.sh"
+    let exists: string = trim(shell("test -f " + script + " && echo yes || echo no"))
+    if exists == "yes" is
+        write(prefix + " Uruchamiam skrypt usuwajacy stare jadra: " + script)
+        sudo_run(script)
+    else is
+        write(prefix + " Skrypt nie istnieje: " + script + " — usuwam biezace jadro.")
+        let uname: string = get_current_kernel()
+        sudo_run("apt remove --purge -y linux-image-" + uname)
+    end
+end
+
+fn create_config_file(kernel_type: string) is
+    let config_dir: string = trim(shell("echo $HOME")) + "/.config/hackeros"
+    shell("mkdir -p " + config_dir)
+    fs_write(config_dir + "/kernel.hacker", "[" + kernel_type + "]\n")
+end
+
+fn add_xanmod_repo(prefix: string) is
+    write(prefix + " Dodaje repozytorium xanmod...")
+    sudo_run("mkdir -p /etc/apt/keyrings")
+    if command_exists("wget") == false is
+        sudo_run("apt update")
+        sudo_run("apt install -y wget")
+    end
+    shell("wget -qO /tmp/xanmod.key https://dl.xanmod.org/archive.key")
+    sudo_run("gpg --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg /tmp/xanmod.key")
+    let release: string = trim(shell("lsb_release -sc 2>/dev/null || echo bookworm"))
+    let list_content: string = "deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org " + release + " main\n"
+    fs_write("/tmp/xanmod-release.list", list_content)
+    sudo_run("cp /tmp/xanmod-release.list /etc/apt/sources.list.d/xanmod-release.list")
+    sudo_run("apt update")
+end
+
+fn install_xanmod() is
+    let prefix: string = "[xanmod-installer]"
+    write(prefix + " Start")
+    let tmpfile: string = "/tmp/xanmod-cpu.hacker"
+    let github_raw: string = "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/hacker-packages/xanmod-cpu.hacker"
+    write(prefix + " Pobieram plik z GitHub: " + github_raw)
+    if command_exists("curl") == false is
+        sudo_run("apt update")
+        sudo_run("apt install -y curl")
+    end
+    let dl: string = trim(shell("curl -fsSL -o " + tmpfile + " " + github_raw + " 2>&1 && echo ok || echo fail"))
+    if dl != "ok" is
+        write(prefix + " Blad pobierania pliku z GitHub.")
+        return
+    end
+    write(prefix + " Plik pobrany.")
+    let mappings: string = parse_mappings(tmpfile)
+    let cpu_text: string = get_cpu_text()
+    write(prefix + " Wykryty CPU: " + get_cpu_model())
+    let selected_target: string = match_cpu_variant(cpu_text, mappings)
+    write(prefix + " Dopasowano target: " + selected_target)
+    let variant: string = get_xanmod_variant(selected_target)
+    write(prefix + " Wybrana wersja xanmod: " + variant)
+    add_xanmod_repo(prefix)
+    let pkg: string = "linux-xanmod-lts-" + variant
+    write(prefix + " Instaluje: " + pkg)
+    sudo_run("apt install -y " + pkg)
+    write(prefix + " Instalacja kernela xanmod zakonczona.")
+    check_and_install_nvidia(prefix)
+    remove_debian_kernel(prefix)
+    create_config_file("xanmod")
+    sudo_run("update-grub")
+    write(prefix + " GOTOWE. Zrestartuj system.")
+end
+
+fn install_liquorix() is
+    let prefix: string = "[liquorix-installer]"
+    write(prefix + " Start")
+    let tmpfile: string = "/tmp/xanmod-cpu.hacker"
+    let github_raw: string = "https://raw.githubusercontent.com/HackerOS-Linux-System/Hacker-Lang/main/hacker-packages/xanmod-cpu.hacker"
+    if command_exists("curl") == false is
+        sudo_run("apt update")
+        sudo_run("apt install -y curl")
+    end
+    let dl: string = trim(shell("curl -fsSL -o " + tmpfile + " " + github_raw + " 2>&1 && echo ok || echo fail"))
+    if dl != "ok" is
+        write(prefix + " Blad pobierania pliku z GitHub.")
+        return
+    end
+    write(prefix + " Plik pobrany.")
+    let mappings: string = parse_mappings(tmpfile)
+    let cpu_text: string = get_cpu_text()
+    write(prefix + " Wykryty CPU: " + get_cpu_model())
+    let selected_target: string = match_cpu_variant(cpu_text, mappings)
+    write(prefix + " Dopasowano target: " + selected_target)
+    write(prefix + " Instaluje jadro Liquorix...")
+    let liquorix_url: string = "https://liquorix.net/install-liquorix.sh"
+    shell("curl -s " + liquorix_url + " -o /tmp/install-liquorix.sh")
+    sudo_run("bash /tmp/install-liquorix.sh")
+    write(prefix + " Jadro Liquorix zainstalowane.")
+    check_and_install_nvidia(prefix)
+    remove_debian_kernel(prefix)
+    create_config_file("liquorix")
+    write(prefix + " GOTOWE. Zrestartuj system.")
+end
+
+fn install_deb_kernel() is
+    let prefix: string = "[deb-kernel-installer]"
+    let current: string = get_current_kernel()
+    let has_liquorix: bool = contains(current, "liquorix")
+    let has_xanmod: bool   = contains(current, "xanmod")
+    if has_liquorix == false && has_xanmod == false is
+        write(prefix + " Jadro Debiana jest juz aktywne. Nic nie robie.")
+        return
+    end
+    write(prefix + " Usuwam aktualne jadro i instaluje debianowe.")
+    sudo_run("apt remove --purge -y linux-image-" + current)
+    sudo_run("apt update")
+    sudo_run("apt install -y linux-image-amd64")
+    sudo_run("update-grub")
+    let config_file: string = trim(shell("echo $HOME")) + "/.config/hackeros/kernel.hacker"
+    shell("rm -f " + config_file)
+    write(prefix + " GOTOWE. Zrestartuj system.")
+end
+
+fn main() is
+    let argc: int    = to_int(trim(shell("echo $#")))
+    let cmd: string  = trim(shell("echo ${1:-}"))
+    if cmd == "" is
+        print_help()
+        return
+    end
+    if cmd == "liquorix" is
+        install_liquorix()
+    else if cmd == "xanmod" is
+        install_xanmod()
+    else if cmd == "deb-kernel" is
+        install_deb_kernel()
+    else is
+        write("Nieznane polecenie: " + cmd)
+        print_help()
+    end
+end
