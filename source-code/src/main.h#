@@ -50,7 +50,7 @@ end
 fn match_cpu_variant(cpu_text: string, mappings: string) -> string is
     ;; Sort by pattern length descending, match against cpu_text
     let matched: string = trim(shell(
-        "echo '" + mappings + "' | awk -F'>' '{print length($1),"|",$0}' | sort -rn | cut -d' ' -f2- | while IFS='|' read _ line; do pat=$(echo $line | cut -d'>' -f1 | xargs | tr '[:upper:]' '[:lower:]'); tgt=$(echo $line | cut -d'>' -f2 | xargs); if echo '" + cpu_text + "' | grep -qi "$pat"; then echo $tgt; break; fi; done | head -1"
+        "echo '" + mappings + "' | awk -F'>' '{print length($1),\"|\",$0}' | sort -rn | cut -d' ' -f2- | while IFS='|' read _ line; do pat=$(echo $line | cut -d'>' -f1 | xargs | tr '[:upper:]' '[:lower:]'); tgt=$(echo $line | cut -d'>' -f2 | xargs); if echo '" + cpu_text + "' | grep -qi \"$pat\"; then echo $tgt; break; fi; done | head -1"
     ))
     if matched == "" is
         matched = "x86-64"
