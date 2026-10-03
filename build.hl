@@ -1,5 +1,3 @@
-// bytes
-// hhc
+|| H#
 
-> cd source-code
-> bytes build --release
+> bit build --release
